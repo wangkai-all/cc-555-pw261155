@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>双轨字幕 · 采集 / 合并 / 分发演示</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; background: #f5f6f8; color: #1f2329; }
+  header { background: #1f3a5f; color: #fff; padding: 18px 24px; }
+  header h1 { margin: 0 0 4px; font-size: 20px; }
+  header p { margin: 0; font-size: 13px; opacity: .85; }
+  main { max-width: 1080px; margin: 0 auto; padding: 16px; }
+  .panel { background: #fff; border: 1px solid #e3e6eb; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 12px; font-size: 16px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  button { font-size: 14px; padding: 8px 16px; border: 0; border-radius: 8px; background: #1f6feb; color: #fff; cursor: pointer; }
+  button:hover { background: #1a5fd0; }
+  button:disabled { background: #9bb8e8; cursor: wait; }
+  select { font-size: 14px; padding: 6px 8px; border: 1px solid #c9cfd6; border-radius: 8px; }
+  .state { margin: 12px 0 0; font-size: 13px; color: #444; background: #f0f4fa; border-radius: 8px; padding: 8px 12px; }
+  .muted { color: #8a919c; }
+  .ok { color: #17803d; }
+  .err { color: #c0352b; }
+  .kv { font-size: 13px; margin: 4px 0; }
+  .kv b { display: inline-block; min-width: 96px; color: #555; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 6px 0 12px; }
+  th, td { border: 1px solid #e0e4ea; padding: 5px 8px; text-align: left; vertical-align: top; }
+  th { background: #f2f5f9; font-weight: 600; }
+  h4 { margin: 12px 0 4px; font-size: 13px; color: #1f3a5f; }
+  .steps { font-size: 13px; padding-left: 20px; }
+  .steps li { margin: 4px 0; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  .col-box { border: 1px solid #e3e6eb; border-radius: 8px; padding: 10px 12px; }
+  .col-box h3 { margin: 0 0 6px; font-size: 14px; }
+  code { background: #eef1f5; border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+  pre { background: #0f1622; color: #d7e0ee; font-size: 12px; padding: 10px 12px; border-radius: 8px; overflow: auto; max-height: 320px; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; font-size: 13px; color: #1f6feb; }
+  .badge { display: inline-block; font-size: 12px; border-radius: 999px; padding: 2px 10px; margin-left: 8px; }
+  .badge.ok { background: #e2f5e8; color: #17803d; }
+  .badge.err { background: #fbe4e2; color: #c0352b; }
+</style>
+</head>
+<body>
+<header>
+  <h1>双轨字幕流水线演示</h1>
+  <p>本地两套字幕来源（对白轨 + 音效轨）→ 采集端逐段版本 → 合并端时间校验 → 整片 / 段级补丁分发 → 播放器只读同一版的两轨</p>
+</header>
+<main>
+  <section class="panel">
+    <h2>操作（按顺序点击即可）</h2>
+    <div class="actions">
+      <button id="btnImport">① 导入双轨字幕</button>
+      <label>分发方式
+        <select id="mode">
+          <option value="patch" selected>段级补丁</option>
+          <option value="full">整片分发</option>
+        </select>
+      </label>
+      <button id="btnRevise">② 打断片段修补并恢复</button>
+      <button id="btnCompare">③ 对比播放版本</button>
+    </div>
+    <p id="state" class="state">状态加载中…</p>
+  </section>
+
+  <section class="panel">
+    <h2>业务结果</h2>
+    <section id="result" data-evidence-result="idle">
+      <p class="muted">尚未操作。点击上方按钮后，这里会显示操作前后的可核对结果。</p>
+    </section>
+  </section>
+
+  <section class="panel">
+    <h2>播放器（只能读同一版的两轨）</h2>
+    <div class="actions">
+      <select id="playVersion"></select>
+      <button id="btnPlay">读取播放版本</button>
+    </div>
+    <div id="playerView"><p class="muted">选择一个版本后点击「读取播放版本」。</p></div>
+  </section>
+</main>
+
+<script>
+'use strict';
+const resultEl = document.getElementById('result');
+const stateEl = document.getElementById('state');
+const playerViewEl = document.getElementById('playerView');
+const playVersionSel = document.getElementById('playVersion');
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function fmt(ms) {
+  const h = String(Math.floor(ms / 3600000)).padStart(2, '0');
+  const m = String(Math.floor((ms % 3600000) / 60000)).padStart(2, '0');
+  const s = String(Math.floor((ms % 60000) / 1000)).padStart(2, '0');
+  const x = String(ms % 1000).padStart(3, '0');
+  return `${h}:${m}:${s}.${x}`;
+}
+async function getState() {
+  const res = await fetch('/api/state');
+  return (await res.json()).data;
+}
+async function refreshState() {
+  const d = await getState();
+  stateEl.textContent = d.playerVersion
+    ? `当前播放版本 ${d.playerVersion} ｜ 播放器已安装 [${d.playerEditions.join(', ')}] ｜ 制作端版本 [${d.authoringEditions.join(', ')}] ｜ 采集端分段数 ${d.segmentCount}`
+    : '尚未导入字幕（播放器为空）';
+  playVersionSel.innerHTML = d.playerEditions.map((v) => `<option>${esc(v)}</option>`).join('');
+}
+
+function trackTable(title, cues) {
+  const rows = cues
+    .map((c) => `<tr><td>${esc(c.id)}</td><td>v${c.v}</td><td>${fmt(c.start)} → ${fmt(c.end)}</td><td>${esc(c.text)}</td></tr>`)
+    .join('');
+  return `<h4>${esc(title)}（${cues.length} 段）</h4>
+    <table><thead><tr><th>段</th><th>版本</th><th>时间范围</th><th>内容</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function playbackView(p) {
+  return `<div class="kv"><b>版本</b> ${esc(p.version)} ｜ <b>校验和</b> <code>${esc(p.checksum)}</code> ｜ 两轨均来自同一版本</div>`
+    + trackTable('对白轨 dialogue', p.tracks.dialogue)
+    + trackTable('音效轨 sfx', p.tracks.sfx);
+}
+function beforeAfter(before, after) {
+  return `<div class="kv"><b>操作前播放版本</b> ${esc(before.playerVersion || '（空）')}</div>
+    <div class="kv"><b>操作后播放版本</b> ${esc(after.playerVersion || '（空）')}</div>`;
+}
+function rawJson(obj) {
+  return `<details><summary>原始 JSON</summary><pre>${esc(JSON.stringify(obj, null, 2))}</pre></details>`;
+}
+function errorCard(op, err) {
+  return `<h3>操作失败 <span class="badge err">${esc(err.code || 'ERROR')}</span></h3>
+    <p class="err">${esc(err.message || String(err))}</p>`;
+}
+
+function renderImport(data, before, after) {
+  return `<h3>① 导入双轨字幕 <span class="badge ok">OK</span></h3>
+    ${beforeAfter(before, after)}
+    <div class="kv"><b>对白轨分段</b> ${esc(data.dialogueSegments.join(', '))}</div>
+    <div class="kv"><b>音效轨分段</b> ${esc(data.sfxSegments.join(', '))}</div>
+    <div class="kv"><b>合并产出版本</b> ${esc(data.edition)}（校验和 <code>${esc(data.checksum)}</code>），首版经整片分发到播放端</div>
+    ${playbackView(data.playback)}
+    ${rawJson(data)}`;
+}
+
+function historyTable(segId, hist) {
+  const rows = hist
+    .map((h) => `<tr><td>v${h.v}</td><td>${esc(h.op)}</td><td>${esc(h.track)}</td><td>${fmt(h.start)} → ${fmt(h.end)}</td><td>${esc(h.text)}</td></tr>`)
+    .join('');
+  return `<h4>分段 ${esc(segId)} 的逐段版本（采集端保留全部历史）</h4>
+    <table><thead><tr><th>版本</th><th>操作</th><th>所在轨</th><th>时间范围</th><th>内容</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function renderRevise(data, before, after) {
+  const steps = data.steps
+    .map((s) => `<li><code>${esc(s.step)}</code> ${esc(s.note || '')} ${s.rejected ? `<span class="err">${esc(s.rejected.code)}: ${esc(s.rejected.message)}</span>` : ''} ${s.playerVersionDuring ? `｜ 中断瞬间播放器仍读 <b>${esc(s.playerVersionDuring)}</b>` : ''} ${s.checksumOk !== undefined ? `｜ 校验和一致: <b class="ok">${s.checksumOk}</b>` : ''}</li>`)
+    .join('');
+  return `<h3>② 打断片段修补并恢复 <span class="badge ok">OK</span>（分发方式：${data.mode === 'full' ? '整片分发' : '段级补丁'}）</h3>
+    ${beforeAfter(before, after)}
+    <ol class="steps">${steps}</ol>
+    ${historyTable('d2', data.segmentHistory.d2)}
+    ${historyTable('d3', data.segmentHistory.d3)}
+    ${historyTable('d4', data.segmentHistory.d4)}
+    ${rawJson(data)}`;
+}
+
+function opLine(o) {
+  if (o.reason === 'moved') return `<li>段 <code>${esc(o.id)}</code> 移轨：${esc(o.fromTrack)} → ${esc(o.track)}（「${esc(o.prev.text)}」）</li>`;
+  if (o.reason === 'changed') return `<li>段 <code>${esc(o.id)}</code> 修改：「${esc(o.prev.text)}」→「${esc(o.cue.text)}」；时间 ${fmt(o.prev.start)}–${fmt(o.prev.end)} → ${fmt(o.cue.start)}–${fmt(o.cue.end)}</li>`;
+  if (o.reason === 'added') return `<li>段 <code>${esc(o.id)}</code> 新增：「${esc(o.cue.text)}」</li>`;
+  return `<li>段 <code>${esc(o.id)}</code> 删除：「${esc(o.prev.text)}」</li>`;
+}
+function renderCompare(data, before, after) {
+  return `<h3>③ 对比播放版本 <span class="badge ok">OK</span></h3>
+    ${beforeAfter(before, after)}
+    <h4>版本差异（${data.ops.length} 个分段级变化）</h4>
+    <ul class="steps">${data.ops.map(opLine).join('')}</ul>
+    <div class="cols">
+      <div class="col-box"><h3>版本 ${esc(data.a.version)}</h3>${playbackView(data.a)}</div>
+      <div class="col-box"><h3>版本 ${esc(data.b.version)}</h3>${playbackView(data.b)}</div>
+    </div>
+    ${rawJson(data)}`;
+}
+
+async function runOp(op, url, body, render) {
+  const before = await getState();
+  let json;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    json = await res.json();
+  } catch (e) {
+    json = { ok: false, error: { code: 'NETWORK', message: String(e) } };
+  }
+  const after = await getState();
+  const ok = json.ok === true;
+  resultEl.dataset.evidenceResult = `${op}:${ok ? 'ok' : 'error'}:${before.playerVersion || '-'}>${after.playerVersion || '-'}`;
+  resultEl.innerHTML = ok ? render(json.data, before, after) : errorCard(op, json.error || {});
+  await refreshState();
+}
+
+document.getElementById('btnImport').addEventListener('click', () =>
+  runOp('import', '/api/import', {}, renderImport));
+document.getElementById('btnRevise').addEventListener('click', () =>
+  runOp('revise', '/api/revise-patch', { mode: document.getElementById('mode').value }, renderRevise));
+document.getElementById('btnCompare').addEventListener('click', () =>
+  runOp('compare', '/api/compare', {}, renderCompare));
+
+document.getElementById('btnPlay').addEventListener('click', async () => {
+  const v = playVersionSel.value;
+  if (!v) return;
+  const res = await fetch('/api/playback?version=' + encodeURIComponent(v));
+  const json = await res.json();
+  playerViewEl.innerHTML = json.ok ? playbackView(json.data) : `<p class="err">${esc(json.error.message)}</p>`;
+});
+
+refreshState();
+</script>
+</body>
+</html>

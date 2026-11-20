@@ -1,0 +1,11 @@
+{
+  "name": "dual-track-subtitle-demo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "双轨字幕采集/合并/分发演示（仅 Node.js 内置模块）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}
